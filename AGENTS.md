@@ -12,8 +12,8 @@ checkPaths:
   - .docpact/config.yaml
   - .github/workflows/docpact.yml
   - _docs/**
-lastReviewedAt: 2026-10-10
-lastReviewedCommit: 5f43228ef53037065516557b5400b85e2caf423b
+lastReviewedAt: 2026-10-11
+lastReviewedCommit: fcb951e8a564f9e1e6cef470ae9a6c6a71145347
 ---
 
 # TianGong AI Edge Function Agent Contract

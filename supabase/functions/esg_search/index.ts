@@ -9,6 +9,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js@2';
 import { Redis } from '@upstash/redis';
 import { corsHeaders } from '../_shared/cors.ts';
 import decodeApiKey from '../_shared/decode_api_key.ts';
+import { createEmailAuthCache } from '../_shared/email_auth_cache.ts';
 import {
   extractSynonymTerms,
   mergeSynonymTerms,
@@ -58,6 +59,10 @@ const supabase = createClient(supabase_url, supabase_publishable_key);
 const redis = new Redis({
   url: redis_url,
   token: redis_token,
+});
+
+const emailAuthCache = createEmailAuthCache(redis, {
+  enabled: Deno.env.get('EMAIL_AUTH_L1_ENABLED')?.trim().toLowerCase() !== 'false',
 });
 
 async function getEsgMeta(supabase: SupabaseClient, meta_contains: string) {
@@ -473,12 +478,12 @@ Deno.serve(async (req) => {
 
   // console.log(email, password);
 
-  if (!(await redis.exists(email))) {
+  if (!emailAuthCache.isAllowed(email) && !(await emailAuthCache.exists(email))) {
     const authResponse = await supabaseAuth(supabase, email, password);
     if (authResponse.status !== 200) {
       return authResponse;
     } else {
-      await redis.setex(email, 3600, '');
+      await emailAuthCache.recordSuccessfulLogin(email);
       first_login = true;
     }
   }

@@ -9,6 +9,7 @@ import { createClient } from '@supabase/supabase-js@2';
 import { Redis } from '@upstash/redis';
 import { corsHeaders } from '../_shared/cors.ts';
 import decodeApiKey from '../_shared/decode_api_key.ts';
+import { createEmailAuthCache } from '../_shared/email_auth_cache.ts';
 import {
   extractSynonymTerms,
   mergeSynonymTerms,
@@ -84,6 +85,10 @@ const redis = new Redis({
   token: redis_token,
 });
 
+const emailAuthCache = createEmailAuthCache(redis, {
+  enabled: Deno.env.get('EMAIL_AUTH_L1_ENABLED')?.trim().toLowerCase() !== 'false',
+});
+
 const EDU_FILTER_FIELDS = [
   'course',
   'type',
@@ -115,8 +120,7 @@ interface FilterOption {
 }
 
 type UserScopedEduMetaAuthResult =
-  | { ok: true; client: ReturnType<typeof createSupabaseClient> }
-  | { ok: false; response: Response };
+  { ok: true; client: ReturnType<typeof createSupabaseClient> } | { ok: false; response: Response };
 
 class RequestValidationError extends Error {}
 
@@ -436,7 +440,7 @@ async function createUserScopedEduMetaClient(
     };
   }
 
-  await redis.setex(email, 3600, '');
+  await emailAuthCache.recordSuccessfulLogin(email);
 
   return {
     ok: true,
@@ -781,12 +785,12 @@ Deno.serve(async (req) => {
 
   // let first_login = false;
 
-  if (!(await redis.exists(email))) {
+  if (!emailAuthCache.isAllowed(email) && !(await emailAuthCache.exists(email))) {
     const authResponse = await supabaseAuth(supabase, email, password);
     if (authResponse.status !== 200) {
       return authResponse;
     } else {
-      await redis.setex(email, 3600, '');
+      await emailAuthCache.recordSuccessfulLogin(email);
       // first_login = true;
     }
   }

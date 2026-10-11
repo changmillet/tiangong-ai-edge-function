@@ -18,9 +18,7 @@ jobs:
         with:
           version: 0.1.4
           args: >
-            validate-config
-            --root .
-            --strict
+            validate-config --root . --strict
 
   lint:
     if: github.event_name == 'pull_request'
@@ -33,8 +31,17 @@ jobs:
         with:
           version: 0.1.4
           args: >
-            lint
-            --root .
-            --base ${{ github.event.pull_request.base.sha }}
-            --head ${{ github.sha }}
-            --mode enforce
+            lint --root . --base ${{ github.event.pull_request.base.sha }} --head ${{ github.sha }} --mode enforce
+
+  email-auth-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.1.4
+      - name: Fixed email-cache contracts
+        run: deno test --no-config scripts/email_auth_cache_test.ts
+      - name: Offline handler and email-log contracts
+        run: >-
+          deno test --no-config --import-map scripts/fixtures/email_auth/import_map.json --allow-env --allow-read=supabase/functions,scripts/fixtures/email_auth --deny-net scripts/email_auth_callers_test.ts
