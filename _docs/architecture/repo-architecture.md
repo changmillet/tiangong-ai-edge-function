@@ -12,8 +12,8 @@ checkPaths:
   - supabase/config.toml
   - Dockerfile
   - package.json
-lastReviewedAt: 2026-10-10
-lastReviewedCommit: 5f43228ef53037065516557b5400b85e2caf423b
+lastReviewedAt: 2026-10-11
+lastReviewedCommit: fcb951e8a564f9e1e6cef470ae9a6c6a71145347
 ---
 
 # Edge Function Architecture
@@ -45,6 +45,16 @@ Query rewriting and all structured text generation share `OPENAI_CHAT_MODEL`; co
 An unset, empty, or whitespace-only `OPENAI_CHAT_MODEL` selects the shared default, `gpt-6-luna`, in both structured entrypoints. The direct helper also trims model names. A request failure propagates through the existing error path without automatic model failover. Alternative models require explicit configuration and validation across generation and rewrite callers, including none/low compatibility.
 
 `course_search` performs Bearer API-key authorization inside the function through the `verify_kb_api_key` RPC. When `UPSTASH_REDIS_URL` and `UPSTASH_REDIS_TOKEN` are configured, successful authorization contexts are cached for up to 15 minutes, capped by token expiry; Redis failures fall back to live RPC verification. Its aggregated `documents` response keeps `content` and `source` and also returns the originating KB `document_id` plus source metadata `tags`, so callers do not need to reverse-engineer record IDs or discard document labels.
+
+## Legacy email authorization cache
+
+`_shared/email_auth_cache.ts` implements a small positive cache for `esg_search`, `sci_search`, `report_search`, normal `edu_search`, `standard_search`, `textbook_search`, `patent_search`, `green_deal_search`, `internal_search`, and `bigquery_search`. Each function owns its own module-scope instance; no cross-worker sharing is implied. Parsing still produces the original email, and existing `logInsert(email, ...)` calls and the log document's `email` field are unchanged. BigQuery's already-commented log call stays commented.
+
+The accepted authorization policy is intentionally email-based: once Redis contains that email, its existence authorizes the request without rechecking the supplied password. This change does not claim credential-bound authentication or migrate API keys. The synchronous hot path reads only an email/deadline map. Positive deadlines are fixed at Redis-request start plus 10,000 ms and never slide on hits. The map holds at most 1,024 FIFO entries. Up to 128 distinct pending Redis reads are tracked for same-email coalescing; overflow follows the original direct-read path. False/error results are not cached. Every coalesced caller checks the original deadline before accepting a positive observation; delayed positive results beyond that deadline fail instead of creating a fresh lease.
+
+Successful password validation creates a missing Redis marker with `SET email value NX EX 3600`. A successful NX no-op preserves the existing marker/value/expiry and can seed the same bounded local lease. The EDU metadata-login path uses this non-renewing write too, while retaining its actual user-session creation. Only real login in the request sets `first_login`; cached authorization does not replace session-dependent metadata logins in SCI, ESG or Standard. These downstream logins and existing business logging remain separate costs.
+
+`EMAIL_AUTH_L1_ENABLED=false` is read when the function instance is initialized. It bypasses both local storage and Redis-read coalescing without removing NX expiry preservation. Redeploy for a deterministic switch; do not assume already-running instances reread environment configuration. This feature does not modify MCP's GET/user-ID cache or scoped `course_search` Bearer caching. Other applications writing the same Redis email key can independently affect its lifetime; the ten-second guarantee is relative to the Redis observation made by this helper, not a promise to control external writers.
 
 ## Integration Points
 

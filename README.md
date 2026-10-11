@@ -16,8 +16,8 @@ checkPaths:
   - .env.example
   - supabase/**
   - test.example.http
-lastReviewedAt: 2026-10-10
-lastReviewedCommit: 5f43228ef53037065516557b5400b85e2caf423b
+lastReviewedAt: 2026-10-11
+lastReviewedCommit: fcb951e8a564f9e1e6cef470ae9a6c6a71145347
 ---
 
 # TianGong-AI-Edge-Functions
@@ -63,6 +63,8 @@ deno info
 Copy `.env.example` to `.env.local` for root-level tooling, and copy `supabase/.env.example` to `supabase/.env.local` before running `npm start`.
 
 Most remote API examples use `x-api-key` for authentication. `course_search` remote examples use scoped bearer tokens so the function can verify `kb:read` and apply collection-scope restrictions through `verify_kb_api_key`.
+
+The ten legacy email/`EXISTS` search entrypoints add a per-isolate, fixed 10-second positive cache. The caller-provided email remains the authorization key and is preserved in `function_log`; this deliberately retains the existing email authorization policy. Cache hits never refresh either TTL. Redis still decides shared authorization with a single `EXISTS`, and successful logins create missing entries with `SET NX EX 3600` without replacing an existing value or expiry. The local deadline starts before the Redis read/write, allowing at most ten additional seconds after the observed Redis authorization expires. No password/token, hash, `PTTL`, Lua script, or background refresh is added. Set `EMAIL_AUTH_L1_ENABLED=false` and redeploy the selected function to bypass local caching/coalescing; non-renewing Redis writes remain. See the development runbook for controlled validation and rollback.
 
 `course_search` can use `UPSTASH_REDIS_URL` and `UPSTASH_REDIS_TOKEN` to cache successful Bearer API-key authorization contexts for 15 minutes. The cache is optional; when it is not configured or Redis is unavailable, the function falls back to the `verify_kb_api_key` RPC.
 

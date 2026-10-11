@@ -1,0 +1,15 @@
+{
+  "imports": {
+    "@supabase/functions-js/edge-runtime.d.ts": "./runtime.ts",
+    "@supabase/supabase-js@2": "./providers.ts",
+    "@upstash/redis": "./providers.ts",
+    "@aws-sdk/credential-provider-node": "./providers.ts",
+    "@opensearch-project/opensearch": "./providers.ts",
+    "@opensearch-project/opensearch/aws": "./providers.ts",
+    "@pinecone-database/pinecone": "./providers.ts",
+    "@google-cloud/bigquery": "./providers.ts",
+    "../../../supabase/functions/_shared/generate_query.ts": "./generate_query.ts",
+    "../../../supabase/functions/_shared/generate_query_en.ts": "./generate_query.ts",
+    "../../../supabase/functions/_shared/openai_embedding.ts": "./embedding.ts"
+  }
+}

@@ -13,8 +13,8 @@ checkPaths:
   - deno.json
   - Dockerfile
   - supabase/**
-lastReviewedAt: 2026-10-10
-lastReviewedCommit: 5f43228ef53037065516557b5400b85e2caf423b
+lastReviewedAt: 2026-10-11
+lastReviewedCommit: fcb951e8a564f9e1e6cef470ae9a6c6a71145347
 ---
 
 # Edge Function Development Runbook
@@ -52,6 +52,27 @@ docpact validate-config --root . --strict
 ```
 
 Use `test.example.http` or a REST client for endpoint checks when function behavior changes.
+
+## Email authorization cache validation and rollback
+
+Run the pure cache contracts and actual-handler contracts without provider access:
+
+```bash
+deno test --no-config scripts/email_auth_cache_test.ts
+deno test --no-config --import-map scripts/fixtures/email_auth/import_map.json --allow-env --allow-read=supabase/functions,scripts/fixtures/email_auth --deny-net scripts/email_auth_callers_test.ts
+```
+
+The `email-auth-contracts` CI job runs both commands with Deno 2.1.4, matching the documented local/runtime baseline.
+
+The handler tests substitute only provider SDKs/generation/embedding with fixtures; the request handlers, email decoder, shared authorization helper and `logInsert` document construction remain real. They must cover Redis/memory/login paths, rejected auth, the original email in logged documents, and session-dependent metadata branches. Confirm the exact command/result before delivery; the fixtures are not live retrieval qualification.
+
+Use a module-initialized `EMAIL_AUTH_L1_ENABLED=false` to disable local caching/coalescing. It is an instance setting; redeploy a target to make a rollback deterministic. Redis writes still use NX EX 3600 and never extend an existing entry. No new dependency or Redis data migration is required. An existing Redis result may be accepted from local memory for up to ten seconds after deletion/expiry; this is the explicitly accepted policy. Never serve a local entry after its own fixed deadline or extend it on a hit/error.
+
+Before updating an existing hosted function, save its current source package, import map, verify_jwt setting, version and source hashes outside Git. Compare the deployed package to the checkout and exclude unrelated drift from the deployment. Validate the exact shared helper against real Redis using only newly generated synthetic email keys and a restricted test endpoint. Do not delete/alter real users' email keys. Keep a hard request/deadline budget and stop on unexpected auth, logging or business errors or degraded project health.
+
+Use legitimate, explicitly scoped test credentials for a business canary with small topK/extK. Keep passwords, API keys and provider responses outside Git; preserve only sanitized validation evidence in the delivery Issue/PR. If a temporary Auth account is required, create a preconfirmed test account without sending an email and delete it after validation. Check that `function_log` still records the original test email for the canary where read access permits; offline logging tests are not proof of live log persistence.
+
+Rollback redeploys the saved pre-change package with its original import map and verify_jwt setting. It must not guess the old version from a default branch or overwrite unrelated shared-file changes. Record actual canary targets, deployed source identities, observations, cleanup and any rollback in the tracked delivery record. A successful canary does not imply every function has been deployed.
 
 ## Query Rewrite Model Evaluation
 

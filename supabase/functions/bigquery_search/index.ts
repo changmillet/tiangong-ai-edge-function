@@ -7,6 +7,7 @@ import { Redis } from '@upstash/redis';
 
 import { corsHeaders } from '../_shared/cors.ts';
 import decodeApiKey from '../_shared/decode_api_key.ts';
+import { createEmailAuthCache } from '../_shared/email_auth_cache.ts';
 import supabaseAuth from '../_shared/supabase_auth.ts';
 
 const supabase_url = Deno.env.get('REMOTE_SUPABASE_URL') ?? Deno.env.get('SUPABASE_URL') ?? '';
@@ -23,6 +24,10 @@ const supabase = createClient(supabase_url, supabase_publishable_key);
 const redis = new Redis({
   url: redis_url,
   token: redis_token,
+});
+
+const emailAuthCache = createEmailAuthCache(redis, {
+  enabled: Deno.env.get('EMAIL_AUTH_L1_ENABLED')?.trim().toLowerCase() !== 'false',
 });
 
 const search = async (query: string, limit: number = 3) => {
@@ -77,12 +82,12 @@ Deno.serve(async (req) => {
 
   // let first_login = false;
 
-  if (!(await redis.exists(email))) {
+  if (!emailAuthCache.isAllowed(email) && !(await emailAuthCache.exists(email))) {
     const authResponse = await supabaseAuth(supabase, email, password);
     if (authResponse.status !== 200) {
       return authResponse;
     } else {
-      await redis.setex(email, 3600, '');
+      await emailAuthCache.recordSuccessfulLogin(email);
       // first_login = true;
     }
   }
