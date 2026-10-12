@@ -60,3 +60,8 @@ Successful password validation creates a missing Redis marker with `SET email va
 
 - MCP server calls these edge functions through configured Supabase deployment URLs.
 - KB and unstructure repositories produce or maintain data that these functions query, but this repo only owns the API execution surface.
+
+The shared logger accepts `OPENSEARCH_LOG_INDEX_NAME`; unset or blank values retain
+`function_log`. Isolated qualification can direct synthetic logs to a separate
+index without changing production defaults or document fields. The write remains
+asynchronous, so successful logging requires bounded read-back evidence.
