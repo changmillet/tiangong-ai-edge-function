@@ -14,6 +14,7 @@ function logInsert(
 ) {
   const opensearch_region = Deno.env.get('OPENSEARCH_REGION') ?? '';
   const opensearch_domain = Deno.env.get('OPENSEARCH_DOMAIN') ?? '';
+  const log_index_name = Deno.env.get('OPENSEARCH_LOG_INDEX_NAME')?.trim() || 'function_log';
 
   const opensearchClient = new Client({
     ...AwsSigv4Signer({
@@ -38,7 +39,7 @@ function logInsert(
 
   opensearchClient
     .index({
-      index: 'function_log',
+      index: log_index_name,
       body: document,
     })
     .then(() => {})

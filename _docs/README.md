@@ -12,8 +12,8 @@ checkPaths:
   - .docpact/config.yaml
   - .github/workflows/docpact.yml
   - _docs/**
-lastReviewedAt: 2026-10-11
-lastReviewedCommit: fcb951e8a564f9e1e6cef470ae9a6c6a71145347
+lastReviewedAt: 2026-10-12
+lastReviewedCommit: baf61f6839a45becf0c57c414c4b3c5f4b9eca20
 ---
 
 # Edge Function Documentation
@@ -33,3 +33,5 @@ This directory contains the repo-local source documents governed by docpact.
 - `_docs/architecture/repo-architecture.md`: Supabase Edge Function topology.
 - `_docs/runbooks/development.md`: local development, validation, and deployment workflow.
 - `_docs/standards/documentation-standards.md`: repo-local documentation rules.
+
+- `_docs/runbooks/isolated-live-qualification.md`: bounded hosted/provider tests, synthetic target ownership, public Crossref exception and verified cleanup.

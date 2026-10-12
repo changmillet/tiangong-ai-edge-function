@@ -16,8 +16,8 @@ checkPaths:
   - .env.example
   - supabase/**
   - test.example.http
-lastReviewedAt: 2026-10-11
-lastReviewedCommit: fcb951e8a564f9e1e6cef470ae9a6c6a71145347
+lastReviewedAt: 2026-10-12
+lastReviewedCommit: baf61f6839a45becf0c57c414c4b3c5f4b9eca20
 ---
 
 # TianGong-AI-Edge-Functions
@@ -184,3 +184,7 @@ npx supabase functions deploy info_extract --project-ref qyyqlnwqwgvzxnccnbgm --
 npx supabase functions deploy question_generation --project-ref qyyqlnwqwgvzxnccnbgm --no-verify-jwt $IMPORT_MAP
 npx supabase functions deploy kg_generate --project-ref qyyqlnwqwgvzxnccnbgm --no-verify-jwt $IMPORT_MAP
 ```
+
+## Isolated live qualification
+
+See [the hosted qualification runbook](_docs/runbooks/isolated-live-qualification.md) for the data-free branch workflow and real OpenAI/Pinecone/OpenSearch/Redis consumer matrix. The scripts under `scripts/live_edge/` use synthetic fixtures, strict target guards, bounded requests and exact cleanup; they never run in CI against live services. Crossref public-paper sampling requires separate approval.

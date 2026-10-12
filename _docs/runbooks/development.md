@@ -13,8 +13,8 @@ checkPaths:
   - deno.json
   - Dockerfile
   - supabase/**
-lastReviewedAt: 2026-10-11
-lastReviewedCommit: fcb951e8a564f9e1e6cef470ae9a6c6a71145347
+lastReviewedAt: 2026-10-12
+lastReviewedCommit: baf61f6839a45becf0c57c414c4b3c5f4b9eca20
 ---
 
 # Edge Function Development Runbook
@@ -105,3 +105,19 @@ Use `--models=<id,id>` to restrict the matrix. No optional candidate is currentl
 ## Deployment
 
 Use the Supabase deployment commands in `README.md` for individual functions. Pass `--import-map supabase/functions/deno.json` so the remote bundler resolves shared Deno and npm import aliases. Docker packaging is not currently a validated path: `Dockerfile` references `supabase/functions/main` and `supabase/functions/import_map.json`, which are not present. Fix and validate the Dockerfile before using Docker deployment commands.
+
+## Isolated hosted consumer qualification
+
+Use a data-free Supabase branch and synthetic Auth users/metadata. Verify its project reference, parent and empty data before writes. A fresh branch copies functions but not external secrets: remove unneeded copies from that new branch before installing provider credentials, then deploy only reviewed test functions. Never install the test probe on production or export production business data.
+
+Set REMOTE_SUPABASE_URL and REMOTE_SUPABASE_PUBLISHABLE_KEY to the branch. Allocate unique nonempty Pinecone namespaces, OpenSearch search indexes, and a separate OPENSEARCH_LOG_INDEX_NAME. The logger retains function_log for unset/blank values. Bind every target and cleanup to the run manifest; never use default namespaces, wildcard deletion or the production log index. Shared infrastructure permission changes remain with the infrastructure owner.
+
+The isolated logging contract runs without provider access:
+
+```bash
+deno test --no-config --import-map scripts/fixtures/email_auth/import_map.json --allow-env=OPENSEARCH_LOG_INDEX_NAME,OPENSEARCH_REGION,OPENSEARCH_DOMAIN --deny-net scripts/isolated_function_log_test.ts
+```
+
+Live evidence needs distinct synthetic markers returned from both retrieval backends, database metadata filtering/hydration, cold authorization rejection and bounded read-back of synthetic logs. HTTP 200 alone proves none of these. Existing email-cache semantics accept a cached email independently of the password; do not mislabel that as a password recheck. Keep private responses/credentials outside Git. Precisely clean fixtures and verify absence before deleting the test branch.
+
+Follow [the isolated live qualification runbook](isolated-live-qualification.md) for deployed HTTP/provider tests and the explicit cleanup evidence contract.
