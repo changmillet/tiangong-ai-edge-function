@@ -13,7 +13,7 @@ checkPaths:
   - Dockerfile
   - package.json
 lastReviewedAt: 2026-10-12
-lastReviewedCommit: baf61f6839a45becf0c57c414c4b3c5f4b9eca20
+lastReviewedCommit: b92089349be491fb8032ff41bf30c6c02ef4ee8f
 ---
 
 # Edge Function Architecture
@@ -61,4 +61,4 @@ Successful password validation creates a missing Redis marker with `SET email va
 - MCP server calls these edge functions through configured Supabase deployment URLs.
 - KB and unstructure repositories produce or maintain data that these functions query, but this repo only owns the API execution surface.
 
-The shared logger accepts `OPENSEARCH_LOG_INDEX_NAME`; unset or blank values retain `function_log`. Isolated qualification can direct synthetic logs to a separate index without changing production defaults or document fields. The write remains asynchronous, so successful logging requires bounded read-back evidence.
+The shared logger accepts `OPENSEARCH_LOG_INDEX_NAME`; unset or blank values retain `function_log`. Isolated qualification can direct synthetic logs to a separate index without changing production defaults or document fields. Each `logInsert` call assigns one random UUID before invoking the SDK, so transport retries address the same document after a committed write loses its acknowledgement. Independent calls retain distinct IDs even when all five document fields match. The write remains asynchronous; supported Edge runtimes register its caught promise with `EdgeRuntime.waitUntil`, and errors log only their class name. This provides per-call retry idempotence, not HTTP-request deduplication or guaranteed delivery. Successful logging still requires bounded read-back evidence.
