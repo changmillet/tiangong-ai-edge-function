@@ -37,15 +37,21 @@ function logInsert(
     ext_k,
   };
 
-  opensearchClient
-    .index({
-      index: log_index_name,
-      body: document,
-    })
+  // SDK retries must address the same document after a committed write whose
+  // acknowledgement was lost. Independent logger calls receive distinct IDs.
+  const request = { index: log_index_name, id: crypto.randomUUID(), body: document };
+  const task = opensearchClient
+    .index(request)
     .then(() => {})
     .catch((error) => {
-      console.error('Error inserting log:', error);
+      // Provider errors can contain signed headers and raw upstream bodies.
+      console.error('Error inserting log:', error instanceof Error ? error.name : 'UnknownError');
     });
+
+  const edgeRuntime = (
+    globalThis as typeof globalThis & { EdgeRuntime?: { waitUntil(task: Promise<void>): void } }
+  ).EdgeRuntime;
+  if (typeof edgeRuntime?.waitUntil === 'function') edgeRuntime.waitUntil(task);
 }
 
 export default logInsert;
