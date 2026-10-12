@@ -92,3 +92,28 @@ deno test --no-lock --config supabase/functions/deno.json --allow-env --allow-sy
 ```
 
 The offline probe tests substitute provider ports and prohibit network access; they are safety contracts, not live qualification. The CI workflow runs those contracts, Python guard tests and isolated logging tests without credentials.
+
+## Qualification observed on 2026-10-12
+
+Tracked delivery: [edge-functions #72](https://github.com/tiangong-ai/edge-functions/issues/72). The data-free branch `dlqbkgbktyeqztezqzlo` under the Knowledge Base parent matched the reviewed 40-migration catalog (24 tables, 72 functions, 11 enums). Selected business tables and Auth users were verified empty before synthetic setup.
+
+- Four deployed consumers passed 13 HTTP requests and 33 assertions: EDU 5/13, ESG 3/7, standards 3/7 and SCI 2/6 (requests/assertions). Both provider-specific content markers and adjacent chunks appeared; ESG/standards metadata no-match stopped retrieval; SCI sources contained the actual test-table DOI/title/authors.
+- Calls used real OpenAI, Pinecone, OpenSearch and Upstash with no provider doubles. The model was explicitly `gpt-6-luna`, with `text-embedding-3-small` embeddings. Cold invalid credentials were rejected by handlers; existing hot-email cache acceptance was tested separately. Redis TTL was observed decreasing across phases rather than being reset by each request.
+- Nine synthetic log documents represented eight distinct invocation records; SCI had two documents with identical invocation fields. No exactly-once logging claim is made and no logging retry policy was changed. All expected service types and the original synthetic email were present. A size-zero, read-only query of production `function_log`, restricted to the run's synthetic emails, returned zero matches and no production rows.
+- The first all-at-once fixture seed hit AOSS bulk errors/507 and a timeout. Its resources were fully removed before qualification resumed one consumer at a time. Tests also observed stale Pinecone aggregate counts and stale AOSS visibility during phase transitions. The probe verifies actual owned records, reports lag honestly and does not query unrelated sources during a phase.
+- Crossref used four real GETs for two explicitly approved public papers. Actual KB ingestion inserted two then zero on labelled local response replay. Both single-work responses lacked abstracts: real no-data backfill skipping was verified, but a successful real-provider abstract update was not claimed.
+- All owned vectors, indexes/logs and Redis keys were removed, with repeated cleanup and a final independent read-back after branch deletion. The test database's four consumer tables, journals/ISSN rows, Auth users and sessions were empty before branch removal. Production function versions and bundle hashes were unchanged; production functions, business data and AWS policies were not modified.
+
+The test packages retained the captured production sources except for the optional log-index setting. Two production OpenAI helpers had an older unset-model default; their captured bytes were retained in the isolated package and the model was explicitly configured. Thus this qualifies the observed configured behavior, not the production unset-model fallback. All four downloaded test packages matched their staged source hashes. Test deployments added a JWT gateway on top of the existing handler authorization; the probe additionally required a random token.
+
+| Function | Isolated version | Bundle SHA-256 |
+| --- | --- | --- |
+| `edu_search` | 5 | `0aa33181e3cf3db0142d4fa66b0d54c28bb1d338875bb0d349f85ec35449de8e` |
+| `esg_search` | 5 | `019b47bc4bd21c8eac846ee40161c6c3b8b85bd8be3fc92b5c7367fba7cfb666` |
+| `standard_search` | 5 | `62ac143ec1720e6fea98ea04d646f103c96f3489f0b7f6671748230a64ba6ac2` |
+| `sci_search` | 5 | `e552c2112c4a6b1ffc5362f36c55663f0afe460b40dc66bb3aa885cb36ba01dd` |
+| `live-edge-probe` | 6 | `95dd20cc58eb24fa74b009d6560876d359fa132bd1a33ee8f9dc209ef83b1775` |
+
+Offline gates passed 105 tests: 21 cache, 49 handler/log, 25 probe, six target/HTTP guard and four Crossref budget tests. Strict docpact and full-branch explicit-diff lint passed. Private source/provider receipts remain outside the public repository; no credentials or raw public-paper responses are committed.
+
+Sanitized aggregate receipt SHA-256: `72476e9d37bb59fe983b0f9692353a8bc78a66f1bebf1603e062da5b84c0f072`.
