@@ -13,7 +13,7 @@ checkPaths:
   - .docpact/config.yaml
   - supabase/functions/**
 lastReviewedAt: 2026-10-12
-lastReviewedCommit: 52facc5a486527a6013cb49d0090947e67aad3f5
+lastReviewedCommit: baf61f6839a45becf0c57c414c4b3c5f4b9eca20
 ---
 
 # Edge Function Repository Contract

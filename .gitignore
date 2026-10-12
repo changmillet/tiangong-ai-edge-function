@@ -7,3 +7,7 @@ package-lock.json
 deno.lock
 test.md
 test.http
+
+# Generated qualification bytecode and governance reports
+__pycache__/
+.docpact/runs/
