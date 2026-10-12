@@ -21,6 +21,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 from urllib.parse import quote, urlsplit
 from urllib.request import build_opener
 import uuid
@@ -33,6 +34,17 @@ JOURNAL = "PLOS ONE"
 MAX_PAPERS = 2
 MAX_REQUESTS = 4
 MAX_BYTES = 2_000_000
+POSITIVE_SAMPLE = {
+    "10.1128/jcm.12.1.60-62.1980": {
+        "journal": "Journal of Clinical Microbiology", "length": 1411,
+        "sha256": "cbb529e80d200eff7440d7e884cdcdc9beb6b0bfc0ee1407a0d8a0f12280f7d2",
+    },
+    "10.31168/2305-6754.2023.1.05": {
+        "journal": "Slovene", "length": 1519,
+        "sha256": "9f4810a6946e4e8f247bf35d9fce522269ed16778f7ccd2ae0e49c0807992b66",
+    },
+}
+POSITIVE_MAX_REQUESTS = 4  # Two fresh metadata GETs and two fresh resolver GETs.
 
 
 class TransportStop(BaseException):
@@ -454,6 +466,284 @@ def confirm_existing_abstracts(target_path: Path) -> dict:
     return receipt
 
 
+def validate_positive_state(state: dict, target: dict) -> None:
+    validate_target(target)
+    if state.get("schema_version") != 1 or state.get("project_ref") != target["project_ref"] or state.get("run_id") != target["run_id"]:
+        raise SafeError("Positive sample manifest does not belong to this run")
+    rows = state.get("owned_rows", [])
+    if not isinstance(rows, list) or len(rows) != 2 or {row.get("doi") for row in rows} != set(POSITIVE_SAMPLE):
+        raise SafeError("Positive sample must contain only the two reviewed public DOIs")
+    identifiers = []
+    for row in rows:
+        try:
+            identifier = uuid.UUID(row["id"])
+        except (KeyError, ValueError, TypeError, AttributeError):
+            raise SafeError("Invalid owned positive sample UUID") from None
+        if identifier.version != 4 or row.get("owner_run_id") != target["run_id"]:
+            raise SafeError("Positive sample UUID intent is not bound to this run")
+        identifiers.append(str(identifier))
+    if len(set(identifiers)) != 2:
+        raise SafeError("Positive sample UUIDs must be distinct")
+    requests = state.get("requests", [])
+    if not isinstance(requests, list) or len(requests) > POSITIVE_MAX_REQUESTS:
+        raise SafeError("Positive sample request ledger exceeds its budget")
+    seen = set()
+    for request in requests:
+        identity = (request.get("kind"), request.get("doi"))
+        if identity[0] not in ("metadata", "resolver") or identity[1] not in POSITIVE_SAMPLE or identity in seen:
+            raise SafeError("Positive sample request ledger has an unapproved or repeated request")
+        seen.add(identity)
+
+
+def record_positive_request(state: dict, target: dict, kind: str, doi: str) -> None:
+    validate_positive_state(state, target)
+    if kind not in ("metadata", "resolver") or doi not in POSITIVE_SAMPLE or len(state["requests"]) >= POSITIVE_MAX_REQUESTS:
+        raise SafeError("Positive sample exact DOI/request budget exceeded")
+    if any(item["kind"] == kind and item["doi"] == doi for item in state["requests"]):
+        raise SafeError("Positive sample provider retries are forbidden")
+    state["requests"].append({"kind": kind, "doi": doi})
+
+
+def verified_source_copy(source: Path, destination: Path) -> str:
+    original = source.read_bytes()
+    if destination.read_bytes() != original:
+        raise SafeError("Positive qualification changed the actual consumer source bytes")
+    return hashlib.sha256(original).hexdigest()
+
+
+def cleanup_positive_rows(connection, state: dict, target: dict) -> None:
+    validate_positive_state(state, target)
+    connection.rollback()
+    with connection.cursor() as cursor:
+        cursor.execute("SET LOCAL statement_timeout='20s'")
+        cursor.execute("SET LOCAL lock_timeout='5s'")
+        for row in state["owned_rows"]:
+            if row.get("insert_requested"):
+                cursor.execute("DELETE FROM public.journals WHERE id=%s AND doi=%s", (row["id"], row["doi"]))
+                cursor.execute("SELECT count(*) FROM public.journals WHERE id=%s", (row["id"],))
+                if cursor.fetchone()[0] != 0:
+                    raise SafeError("Positive fixture UUID belongs to a foreign DOI; cleanup refused")
+    connection.commit()
+    with connection.cursor() as cursor:
+        for row in state["owned_rows"]:
+            if row.get("insert_requested"):
+                cursor.execute("SELECT count(*) FROM public.journals WHERE id=%s AND doi=%s", (row["id"], row["doi"]))
+                if cursor.fetchone()[0] != 0:
+                    raise SafeError("Owned positive abstract fixture remains after cleanup")
+    connection.rollback()
+    state["cleanup_verified"] = True
+
+
+def cleanup_positive_abstracts(target_path: Path) -> dict:
+    """Retry only precise owned-row cleanup after an interrupted qualification."""
+    target = load_private(target_path)
+    state_path = target_path.parent / "crossref-positive-abstract.private.json"
+    if state_path.is_symlink() or not state_path.is_file() or state_path.stat().st_mode & 0o077:
+        raise SafeError("Positive cleanup requires its private regular 0600 ownership manifest")
+    state = json.loads(state_path.read_text())
+    validate_positive_state(state, target)
+    import psycopg2
+    with psycopg2.connect(target["db_url"], connect_timeout=15) as connection:
+        cleanup_positive_rows(connection, state, target)
+    private_json(state_path, state)
+    return {"ok": True, "operation": "cleanup-positive-abstracts", "run_id": target["run_id"], "fixtures_cleaned": state["cleanup_verified"], "provider_requests": 0}
+
+
+def qualify_positive_abstracts(target_path: Path) -> dict:
+    """Fresh public metadata, real empty-field candidates and live Crossref resolution.
+
+    This operation is separate from the historical PLOS sample/receipts. Every
+    positive response comes from a new real GET, never recorded-response replay.
+    """
+    target = load_private(target_path)
+    state_path = target_path.parent / "crossref-positive-abstract.private.json"
+    receipt_path = target_path.parent / "crossref-positive-abstract.json"
+    if state_path.exists() or receipt_path.exists():
+        raise SafeError("Positive abstract qualification already has a receipt; refusing reuse")
+    state = {"schema_version": 1, "project_ref": target["project_ref"], "run_id": target["run_id"],
+             "owned_rows": [{"doi": doi, "id": str(uuid.uuid4()), "owner_run_id": target["run_id"], "insert_requested": False} for doi in POSITIVE_SAMPLE],
+             "requests": [], "responses": [], "cleanup_verified": False, "source_sha256": {}}
+    validate_positive_state(state, target)
+    private_json(state_path, state)  # Persist all UUID/DOI intent before network or INSERT.
+    previous_environment = dict(os.environ)
+    connection = None
+    failure = None
+    result = None
+    deadline = time.monotonic() + 180
+    with tempfile.TemporaryDirectory(prefix="tiangong-positive-abstract-") as directory:
+        temporary = Path(directory)
+        empty_env = temporary / "empty.env"
+        empty_env.write_text("")
+        copied_skills = temporary / "skills"
+        for name, filename in (("fetch-meta-to-kb", "fetch_meta_to_kb.py"), ("fetch-abstract-to-kb", "fetch_abstract_to_kb.py")):
+            source = WORKSPACE / "skills" / name / "scripts" / filename
+            destination = copied_skills / name / "scripts" / filename
+            destination.parent.mkdir(parents=True)
+            shutil.copyfile(source, destination)
+            state["source_sha256"][str(source.relative_to(WORKSPACE))] = verified_source_copy(source, destination)
+        private_json(state_path, state)
+        environment = {key: value for key, value in previous_environment.items() if key in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")}
+        environment.update({"DATABASE_URL": target["db_url"], "KB_ENV_FILE": str(empty_env), "PYTHON_DOTENV_DISABLED": "1", "KB_SKILLS_DIR": str(copied_skills), "KB_LOG_DIR": str(temporary / "logs"), "KB_ABSTRACT_STATE_PATH": str(temporary / "abstract-state.json")})
+        try:
+            os.environ.clear()
+            os.environ.update(environment)
+            sys.path.insert(0, str(WORKSPACE / "TianGong-AI-KB/src/file_processing/journals"))
+            import kb_abstract_pipeline as pipeline
+            import kb_runtime
+            import psycopg2
+            from psycopg2.extras import Json
+
+            for name in ("kb_abstract_pipeline.py", "kb_runtime.py"):
+                source = WORKSPACE / "TianGong-AI-KB/src/file_processing/journals" / name
+                state["source_sha256"][str(source.relative_to(WORKSPACE))] = hashlib.sha256(source.read_bytes()).hexdigest()
+            private_json(state_path, state)
+            metadata_skill = kb_runtime.load_skill("fetch-meta-to-kb", "fetch_meta_to_kb.py")
+            # Frames are built only from fresh metadata, using the original skill.
+            def open_live(request, kind, doi, timeout=15):
+                expected = "https://api.crossref.org/works/" + quote(doi, safe="")
+                actual = request.full_url if hasattr(request, "full_url") else str(request)
+                if actual != expected or time.monotonic() >= deadline:
+                    raise TransportStop("Positive Crossref source/deadline limit exceeded")
+                record_positive_request(state, target, kind, doi)
+                private_json(state_path, state)
+                return build_opener(NoRedirect()).open(request, timeout=min(timeout, 20, max(1, deadline - time.monotonic())))
+
+            def save_response(raw, kind, doi):
+                if len(raw) > MAX_BYTES:
+                    raise TransportStop("Positive Crossref response exceeds the byte budget")
+                decoded = json.loads(raw)
+                if decoded.get("status") != "ok" or decoded.get("message", {}).get("DOI") != doi:
+                    raise TransportStop("Positive Crossref response identity differs from the reviewed DOI")
+                filename = f"crossref-positive-{kind}-{list(POSITIVE_SAMPLE).index(doi) + 1}.private.json"
+                private_json(target_path.parent / filename, decoded)
+                state["responses"].append({"kind": kind, "doi": doi, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw), "private_file": filename})
+                private_json(state_path, state)
+                return decoded
+
+            from urllib.request import Request
+            frames = []
+            for doi in POSITIVE_SAMPLE:
+                request = Request("https://api.crossref.org/works/" + quote(doi, safe=""), headers={"Accept": "application/json", "User-Agent": "Tiangong-Isolated-Positive-Abstract/1.0"})
+                with open_live(request, "metadata", doi, 20) as response:
+                    if response.status != 200:
+                        raise TransportStop("Crossref metadata did not return HTTP 200")
+                    record = save_response(response.read(MAX_BYTES + 1), "metadata", doi)["message"]
+                journal = html.unescape((record.get("container-title") or [""])[0])
+                if journal != POSITIVE_SAMPLE[doi]["journal"] or pipeline.TERMINAL_TITLE.match((record.get("title") or [""])[0].strip()):
+                    raise SafeError("Public paper does not match the reviewed journal/article type")
+                frame = metadata_skill.create_dataframe([record], journal)
+                if len(frame) != 1 or frame.iloc[0]["doi"] != doi or not frame.iloc[0]["authors"]:
+                    raise SafeError("Actual metadata skill rejected the reviewed public paper")
+                frames.append(frame.iloc[0])
+            connection = psycopg2.connect(target["db_url"], connect_timeout=15)
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout='20s'")
+                cursor.execute("SET lock_timeout='5s'")
+                cursor.execute("SELECT count(*) FROM public.journals WHERE doi=ANY(%s) OR id=ANY(%s::uuid[])", (list(POSITIVE_SAMPLE), [row["id"] for row in state["owned_rows"]]))
+                if cursor.fetchone()[0] != 0:
+                    raise SafeError("Positive DOI/UUID already exists; refusing to adopt another row")
+            connection.rollback()
+            for row in state["owned_rows"]:
+                row["insert_requested"] = True
+            private_json(state_path, state)
+            with connection.cursor() as cursor:
+                for owned_row, metadata_row in zip(state["owned_rows"], frames):
+                    cursor.execute("INSERT INTO public.journals(id,title,doi,journal,authors,date,abstract) VALUES(%s,%s,%s,%s,%s,%s,NULL)", (owned_row["id"], metadata_row["title"], metadata_row["doi"], metadata_row["journal"], Json(metadata_row["authors"]), metadata_row["date"]))
+            connection.commit()
+            readonly = pipeline.database_connection(readonly=True)
+            try:
+                candidates = [row for row in pipeline.database_rows(readonly) if row["doi"] in POSITIVE_SAMPLE]
+            finally:
+                readonly.close()
+            if len(candidates) != 2 or {row["doi"] for row in candidates} != set(POSITIVE_SAMPLE):
+                raise SafeError("Actual KB candidate query did not find exactly the two empty fields")
+
+            # The actual resolver consumes the real live HTTP stream. This wrapper
+            # only enforces exact URLs/budgets and records bytes; no cached body,
+            # synthesized provider response or fallback provider is supplied.
+            class RecordedResponse:
+                def __init__(self, response, doi):
+                    self.response, self.doi = response, doi
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_args):
+                    self.response.close()
+                def read(self, size):
+                    raw = self.response.read(min(size, MAX_BYTES + 1))
+                    save_response(raw, "resolver", self.doi)
+                    return raw
+            urls = {"https://api.crossref.org/works/" + quote(doi, safe=""): doi for doi in POSITIVE_SAMPLE}
+            def resolver_urlopen(request, timeout=None):
+                actual = request.full_url if hasattr(request, "full_url") else str(request)
+                doi = urls.get(actual)
+                if doi is None:
+                    raise TransportStop("Positive qualification forbids other providers or DOI identities")
+                response = open_live(request, "resolver", doi, timeout or 15)
+                if response.status != 200:
+                    response.close()
+                    raise TransportStop("Positive resolver source did not return HTTP 200")
+                return RecordedResponse(response, doi)
+            original_urlopen = pipeline.urlopen
+            pipeline.urlopen = resolver_urlopen
+            try:
+                resolved = [pipeline.resolve_one(row, pipeline.PublicSources(timeout=15)) for row in candidates]
+            finally:
+                pipeline.urlopen = original_urlopen
+            for item in resolved:
+                expected = POSITIVE_SAMPLE[item["doi"]]
+                if item["status"] != "success" or item.get("source") != "crossref" or len(item.get("abstract", "")) != expected["length"] or hashlib.sha256(item.get("abstract", "").encode()).hexdigest() != expected["sha256"]:
+                    raise SafeError("Live positive abstract does not match its reviewed content fingerprint")
+            written = pipeline.write_abstracts(resolved)
+            # Use the same real public abstract again, not fabricated replacement.
+            repeated = pipeline.write_abstracts(resolved)
+            if not written["ok"] or written["result"]["updated"] != 2 or not repeated["ok"] or repeated["result"]["updated"] != 0 or repeated["result"]["already_present"] != 2:
+                raise SafeError("Actual guarded abstract update/repeat did not preserve existing fields")
+            with connection.cursor() as cursor:
+                observed = []
+                for owned_row in state["owned_rows"]:
+                    cursor.execute("SELECT abstract FROM public.journals WHERE id=%s AND doi=%s", (owned_row["id"], owned_row["doi"]))
+                    value = cursor.fetchone()
+                    digest = hashlib.sha256(value[0].encode()).hexdigest() if value and isinstance(value[0], str) else None
+                    if digest != POSITIVE_SAMPLE[owned_row["doi"]]["sha256"]:
+                        raise SafeError("Positive abstract readback changed a nonempty field")
+                    observed.append({"doi": owned_row["doi"], "length": len(value[0]), "sha256": digest})
+            connection.rollback()
+            readonly = pipeline.database_connection(readonly=True)
+            try:
+                remaining = [row for row in pipeline.database_rows(readonly) if row["doi"] in POSITIVE_SAMPLE]
+            finally:
+                readonly.close()
+            if remaining:
+                raise SafeError("Positive papers remain eligible after actual abstract writes")
+            result = {"ok": True, "project_ref": target["project_ref"], "run_id": target["run_id"], "public_source": "Crossref", "public_paper_count": 2, "metadata_source": "Fresh live single-work responses through original metadata skill", "candidate_count_before": 2, "candidate_count_after": 0, "abstracts": observed, "abstract_backfill": {"qualified": True, "updated": 2, "repeat_updated": 0, "already_present": 2, "existing_values_preserved": True}, "source_sha256": state["source_sha256"], "mock_or_cached_positive_responses": False}
+        except (Exception, TransportStop) as error:
+            failure = error
+        finally:
+            try:
+                if connection is not None:
+                    try:
+                        cleanup_positive_rows(connection, state, target)
+                        private_json(state_path, state)
+                    finally:
+                        connection.close()
+                elif not any(row["insert_requested"] for row in state["owned_rows"]):
+                    state["cleanup_verified"] = True  # No DB INSERT was attempted.
+                    private_json(state_path, state)
+            except Exception as cleanup_error:
+                failure = cleanup_error
+                state["cleanup_verified"] = False
+                private_json(state_path, state)
+            finally:
+                os.environ.clear()
+                os.environ.update(previous_environment)
+    receipt = result if result is not None and failure is None else {"ok": False, "project_ref": target["project_ref"], "run_id": target["run_id"], "public_paper_count": 2, "error_type": type(failure).__name__ if failure else "Unknown", "error": "Positive public abstract qualification failed; provider and target details withheld."}
+    receipt.update({"request_count": len(state["requests"]), "metadata_requests": sum(item["kind"] == "metadata" for item in state["requests"]), "resolver_requests": sum(item["kind"] == "resolver" for item in state["requests"]), "request_limit": POSITIVE_MAX_REQUESTS, "paper_limit": 2, "fixtures_cleaned": state["cleanup_verified"], "completed_at": datetime.now(timezone.utc).isoformat()})
+    private_json(receipt_path, receipt)
+    if failure:
+        raise SafeError(receipt["error"]) from None
+    return receipt
+
+
 def self_test() -> None:
     """Pure budget and hard-target checks; never open a network or DB socket."""
     import unittest
@@ -478,7 +768,110 @@ def self_test() -> None:
             state["owned_dois"].append("10.1371/test-3")
             with self.assertRaises(SafeError):
                 validate_observed_sample(state, target)
-    results = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(BudgetTests))
+    class PositiveTests(unittest.TestCase):
+        def state(self):
+            return {"schema_version": 1, "project_ref": BRANCH_REF, "run_id": target["run_id"], "owned_rows": [{"doi": doi, "id": str(uuid.uuid4()), "owner_run_id": target["run_id"], "insert_requested": False} for doi in POSITIVE_SAMPLE], "requests": []}
+        def test_exact_reviewed_two_doi_sample(self):
+            validate_positive_state(self.state(), target)
+            state = self.state()
+            state["owned_rows"][0]["doi"] = "10.99999/unreviewed"
+            with self.assertRaises(SafeError):
+                validate_positive_state(state, target)
+        def test_positive_production_and_wrong_run_are_refused(self):
+            with self.assertRaises(SafeError):
+                validate_positive_state(self.state(), {**target, "project_ref": "qyyqlnwqwgvzxnccnbgm"})
+            state = self.state()
+            state["owned_rows"][0]["owner_run_id"] = "b" * 16
+            with self.assertRaises(SafeError):
+                validate_positive_state(state, target)
+        def test_duplicate_uuid_and_third_paper_are_refused(self):
+            state = self.state()
+            state["owned_rows"][1]["id"] = state["owned_rows"][0]["id"]
+            with self.assertRaises(SafeError):
+                validate_positive_state(state, target)
+            state = self.state()
+            state["owned_rows"].append({"doi": "10.99999/third"})
+            with self.assertRaises(SafeError):
+                validate_positive_state(state, target)
+        def test_two_fresh_metadata_and_two_resolver_calls_no_retry(self):
+            state = self.state()
+            for kind in ("metadata", "resolver"):
+                for doi in POSITIVE_SAMPLE:
+                    record_positive_request(state, target, kind, doi)
+            self.assertEqual(len(state["requests"]), 4)
+            with self.assertRaises(SafeError):
+                record_positive_request(state, target, "resolver", next(iter(POSITIVE_SAMPLE)))
+            with self.assertRaises(SafeError):
+                record_positive_request(self.state(), target, "resolver", "10.99999/unreviewed")
+        def test_repeat_doi_kind_and_unknown_provider_are_refused(self):
+            state = self.state()
+            doi = next(iter(POSITIVE_SAMPLE))
+            record_positive_request(state, target, "resolver", doi)
+            with self.assertRaises(SafeError):
+                record_positive_request(state, target, "resolver", doi)
+            with self.assertRaises(SafeError):
+                record_positive_request(self.state(), target, "openalex", doi)
+        def test_actual_source_copy_byte_identity(self):
+            with tempfile.TemporaryDirectory() as directory:
+                source, copied = Path(directory) / "source.py", Path(directory) / "copied.py"
+                source.write_bytes(b"# Source identity fixture\r\n")
+                shutil.copyfile(source, copied)
+                self.assertEqual(verified_source_copy(source, copied), hashlib.sha256(source.read_bytes()).hexdigest())
+                copied.write_bytes(b"# Mutated source\n")
+                with self.assertRaises(SafeError):
+                    verified_source_copy(source, copied)
+        def test_cleanup_is_exact_uuid_and_doi_not_broad_doi_only(self):
+            class Cursor:
+                def __init__(self):
+                    self.statements = []
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_args):
+                    return None
+                def execute(self, sql, parameters=None):
+                    self.statements.append((sql, parameters))
+                def fetchone(self):
+                    return (0,)
+            class Connection:
+                def __init__(self):
+                    self.recording_cursor = Cursor()
+                def cursor(self):
+                    return self.recording_cursor
+                def rollback(self):
+                    return None
+                def commit(self):
+                    return None
+            state = self.state()
+            for row in state["owned_rows"]:
+                row["insert_requested"] = True
+            connection = Connection()
+            cleanup_positive_rows(connection, state, target)
+            deletes = [(statement, parameters) for statement, parameters in connection.recording_cursor.statements if statement.startswith("DELETE")]
+            self.assertEqual(len(deletes), 2)
+            self.assertTrue(all(statement.endswith("WHERE id=%s AND doi=%s") for statement, _ in deletes))
+            self.assertEqual([parameters for _, parameters in deletes], [(row["id"], row["doi"]) for row in state["owned_rows"]])
+            self.assertTrue(state["cleanup_verified"])
+        def test_planned_but_unattempted_rows_are_not_deleted(self):
+            class Cursor:
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_args):
+                    return None
+                def execute(self, statement, parameters=None):
+                    if statement.startswith(("DELETE", "SELECT")):
+                        raise AssertionError("Unattempted UUID intent was queried or deleted")
+            class Connection:
+                def cursor(self):
+                    return Cursor()
+                def rollback(self):
+                    return None
+                def commit(self):
+                    return None
+            state = self.state()
+            cleanup_positive_rows(Connection(), state, target)
+            self.assertTrue(state["cleanup_verified"])
+    suite = unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(BudgetTests), unittest.defaultTestLoader.loadTestsFromTestCase(PositiveTests)])
+    results = unittest.TextTestRunner().run(suite)
     if not results.wasSuccessful():
         raise SafeError("Crossref offline safety checks failed")
 
@@ -486,7 +879,10 @@ def self_test() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path)
-    parser.add_argument("--confirm-existing-abstracts", action="store_true")
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument("--confirm-existing-abstracts", action="store_true")
+    operation.add_argument("--positive-abstract-sample", action="store_true", help="Qualify the two reviewed abstract-bearing public papers using four fresh Crossref GETs.")
+    operation.add_argument("--cleanup-positive-abstracts", action="store_true", help="Retry exact UUID/DOI cleanup from the private manifest without provider calls.")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -495,11 +891,19 @@ def main() -> None:
     if args.target is None:
         parser.error("--target is required for live qualification")
     try:
-        result = confirm_existing_abstracts(args.target) if args.confirm_existing_abstracts else qualify(args.target)
+        if args.cleanup_positive_abstracts:
+            print(json.dumps(cleanup_positive_abstracts(args.target)))
+            return
+        result = qualify_positive_abstracts(args.target) if args.positive_abstract_sample else confirm_existing_abstracts(args.target) if args.confirm_existing_abstracts else qualify(args.target)
     except Exception as error:
         print(json.dumps({"ok": False, "error_type": type(error).__name__, "error": str(error) if isinstance(error, SafeError) else "Crossref qualification failed; credentials and provider diagnostics withheld."}))
         raise SystemExit(1)
-    print(json.dumps({"ok": result["ok"], "public_paper_count": result["public_paper_count"], "metadata_insert_counts": result["metadata_insert_counts"], "request_count": result["request_count"], "abstract_backfill_qualified": result["abstract_backfill"]["qualified"], "fixtures_cleaned": result["fixtures_cleaned"], "receipt": str(args.target.parent / "crossref-live.json")}))
+    summary = {"ok": result["ok"], "public_paper_count": result["public_paper_count"], "request_count": result["request_count"], "abstract_backfill_qualified": result["abstract_backfill"]["qualified"], "fixtures_cleaned": result["fixtures_cleaned"], "receipt": str(args.target.parent / ("crossref-positive-abstract.json" if args.positive_abstract_sample else "crossref-live.json"))}
+    if args.positive_abstract_sample:
+        summary.update({"metadata_requests": result["metadata_requests"], "resolver_requests": result["resolver_requests"], "candidate_count_before": result["candidate_count_before"], "candidate_count_after": result["candidate_count_after"], "updated": result["abstract_backfill"]["updated"], "repeat_updated": result["abstract_backfill"]["repeat_updated"]})
+    else:
+        summary["metadata_insert_counts"] = result["metadata_insert_counts"]
+    print(json.dumps(summary))
 
 
 if __name__ == "__main__":

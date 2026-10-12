@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "@opensearch-project/opensearch": "./log_retry_transport.ts",
+    "@opensearch-project/opensearch/aws": "npm:@opensearch-project/opensearch/aws",
+    "@aws-sdk/credential-provider-node": "npm:@aws-sdk/credential-provider-node",
+    "@supabase/functions-js/edge-runtime.d.ts": "jsr:@supabase/functions-js/edge-runtime.d.ts"
+  }
+}

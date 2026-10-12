@@ -11,6 +11,7 @@ checkPaths:
   [
     scripts/live_edge/**,
     scripts/isolated_function_log_test.ts,
+    scripts/function_log_retry_test.ts,
     supabase/functions/_shared/supabase_function_log.ts,
     .github/workflows/docpact.yml,
   ]
@@ -69,6 +70,68 @@ This keeps at most one test retrieval index plus the dedicated log index active.
 
 On AOSS 507 or timeouts, stop writes, retain error metadata and reduce test load. AWS describes 507 as an internal error generally associated with OCU overload or scaling delay ([official error guidance](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-getting-started.html)). That description does not prove a specific run's root cause. Do not change shared capacity, access policy or production indexes through this workflow. Cleanup uses owned index mappings and deletion read-back rather than depending on a healthy search operation.
 
+## Logger retry idempotence and controlled canary
+
+Each `logInsert` invocation generates one UUID and supplies it as the OpenSearch document ID. SDK retries after a committed write with a lost acknowledgement address that same document. The original five document fields and index default remain unchanged. Two independent invocations get distinct UUIDs even when their email, timestamp and other fields are identical. This is per-logger-invocation retry idempotence, not HTTP-wide deduplication or an exactly-once delivery claim. The historical SCI duplicate is consistent with an acknowledgement-loss retry; its specific cause was not uniquely established by the previous receipts.
+
+Logging retains its nonblocking void return. When available, the logger registers the handled write promise with `EdgeRuntime.waitUntil`; local runtimes without that API still work. Background registration protects the task lifecycle after a response, but does not provide a durable queue. Failed writes log only an error name, without upstream bodies or signed request metadata.
+
+The real-SDK loopback regression first reproduced two documents with the old automatic-ID logger after both a commit-then-503 and a commit-then-socket-drop. The fixed logger left one document after two attempts in each case, and retained two documents for two legitimate identical invocations. It also checks background registration, safely handled rejection, unchanged document fields and absent `EdgeRuntime` compatibility. The test imports `Transport` through the same alias as the actual logger and prints the resolved module/version. Runtime SDK aliases remain unpinned; the regression does not assume a fixed package version or mix a pinned test observer with a different production client. The socket-drop case uses the client's normal timeout and can take about 30 seconds.
+
+For the hosted controlled canary, after verifying a new data-free branch:
+
+1. Read back the AOSS collection capability. The explicit document-ID request must be supported; do not change a collection type or shared AWS policy.
+2. Allocate the exact owned log index and configure the existing branch/ref/run guards and random token. Deploy an explicit wrapper calling `Deno.serve(createLogRetryCanaryHandler())`, with gateway JWT verification on. Verify its transitive source and deployment hashes before invoking it.
+3. Apply `scripts/live_edge/log_retry_import_map.json` only to the canary. Its scoped connection wrapper delegates to the real SDK and real SigV4 connection. After the first actual backend 200/201 acknowledgement, it delivers a single synthetic 503 to the SDK so the SDK retries the real committed write. Normal business functions must retain their normal import map.
+4. Submit only `{"action":"retry_once"}` with the branch JWT and run token. Require two backend attempts, one invocation, one stable request/response UUID, and exactly one matching stored log document. Read back only this synthetic email and `invoked_at`; a canary HTTP 200 alone is insufficient.
+5. Submit `{"action":"two_distinct"}`. Require three attempts (one injected retry), two distinct invocation UUIDs and exactly two matching documents even though their original five fields are identical. Check the current SDK version from the receipt rather than asserting a fixed version.
+6. Clean the exact owned log index, verify absence, and remove the temporary canary/branch and credential files following the final cleanup procedure.
+
+The canary is a test endpoint, not a production fault injector. Its offline transport suite uses a synthetic loopback document store and the actual SDK; those results are distinct from hosted AOSS evidence.
+
+### Reproducible private canary package
+
+From the Edge repository root, assemble this layout in a new private deployment directory. The nested shared-helper path preserves the canary's unchanged relative import. Existing branch configuration and credentials remain outside the public checkout:
+
+```text
+deployment/supabase/functions/log-retry-canary/
+  index.ts
+  deno.json
+  scripts/live_edge/log_retry_canary.ts
+  scripts/live_edge/log_retry_transport.ts
+  supabase/functions/_shared/supabase_function_log.ts
+```
+
+The wrapper must use a normal formatted static import. A minified wrapper with no spaces was not discovered correctly by the CLI package uploader:
+
+```typescript
+import { createLogRetryCanaryHandler } from './scripts/live_edge/log_retry_canary.ts';
+Deno.serve(createLogRetryCanaryHandler());
+```
+
+Copy the three listed source modules without changing their bytes. Copy the normal `supabase/functions/deno.json` into the function directory, replacing only this mapping:
+
+```json
+{
+  "@opensearch-project/opensearch": "./scripts/live_edge/log_retry_transport.ts"
+}
+```
+
+Keep every other mapping, especially the `/aws` signer, unchanged. Add or verify this section in the private deployment root's `supabase/config.toml`:
+
+```toml
+[functions.log-retry-canary]
+verify_jwt = true
+```
+
+From that private deployment root, after validating the exact preview identity, deploy only the named function:
+
+```bash
+supabase functions deploy log-retry-canary --project-ref VERIFIED_PREVIEW_REF --import-map supabase/functions/log-retry-canary/deno.json
+```
+
+Do not omit the function name, pass `--prune`, or reuse this mapping for normal SCI/search deployments. Download/read back the deployed source package and verify all staged file hashes, its wrapper, import map and gateway JWT setting. An API bundle upload does not inherit the repository's root `deno.lock`; the normal npm aliases are unversioned. Record SDK versions actually returned by the canary rather than inferring a pin from a local lockfile or test run.
+
 ## Public Crossref exception
 
 Only when separately authorized, `crossref_check.py` qualifies the actual KB collector against at most two public papers and four Crossref GETs. It leaves the KB collector and skill sources unchanged, bounds live pagination at the transport boundary, and records source hashes. Duplicate insertion uses a clearly labelled local replay of the captured real HTTP responses; it is not a second live query. The optional `--confirm-existing-abstracts` action reads only those same two DOIs. No fabricated abstract is substituted when Crossref returns none. Other provider fallbacks are disabled for this narrowly authorized Crossref check.
@@ -80,6 +143,24 @@ python scripts/live_edge/crossref_check.py --target /private/path/target.json --
 
 Public metadata and raw responses stay private and are never repository fixtures. The script deletes its exact paper/ISSN records and verifies absence, preserving other synthetic consumer fixtures in the same branch.
 
+### Positive real-provider abstract backfill
+
+The historical PLOS sample contained no public abstracts. To qualify a positive write, obtain explicit authorization for the separate two-paper sample recorded in `POSITIVE_SAMPLE`, then use a newly verified empty branch:
+
+```bash
+python scripts/live_edge/crossref_check.py --target /private/path/target.json --positive-abstract-sample
+```
+
+This operation permits exactly four fresh Crossref GETs: two single-work metadata requests and two resolver requests for the same reviewed DOIs. It does not replay cached positive responses or contact fallback providers. The original metadata skill converts real records; controlled empty-abstract rows get explicit UUID/DOI ownership intent before insertion. The actual KB candidate query must find two rows, the actual resolver must return the reviewed abstract fingerprints, and the guarded writer must update two fields. Repeating the same real abstracts must update zero fields and report both existing values preserved. The candidate query must then find zero eligible owned rows.
+
+Require exact UUID-and-DOI cleanup and absence read-back, including on failure. After an interrupted run, use the private manifest to retry cleanup without another provider request:
+
+```bash
+python scripts/live_edge/crossref_check.py --target /private/path/target.json --cleanup-positive-abstracts
+```
+
+Save public response bodies, fingerprints and source hashes outside Git. If a reviewed paper no longer supplies its expected abstract, stop and report the observed limitation; do not synthesize text or expand the sample without scope. This sample's positive results do not replace the historical no-data receipt.
+
 ## Final cleanup and offline gates
 
 After every phase, unscoped probe `cleanup` removes any remaining owned vectors, search indexes, log index and exact synthetic email keys. Require empty list/fetch and zero count, index 404 responses and Redis EXISTS=0/TTL=-2; repeat read-back or idempotent cleanup only within a fixed budget. Then run fixture cleanup, verify own database rows and Auth users/sessions are absent, remove the temporary branch and private credential files, and preserve nonsecret receipts. No namespace-wide `deleteAll`, wildcard delete or table truncate is used.
@@ -88,10 +169,12 @@ After every phase, unscoped probe `cleanup` removes any remaining owned vectors,
 python scripts/live_edge/fixtures.py cleanup --target /private/path/target.json
 python scripts/live_edge/test_safety.py
 python scripts/live_edge/crossref_check.py --self-test
+deno test --no-lock --config supabase/functions/deno.json --allow-env --allow-sys=osRelease --allow-run=node --allow-net=127.0.0.1 scripts/function_log_retry_test.ts
+deno test --no-lock --config supabase/functions/deno.json --allow-env --allow-sys=osRelease --allow-net=127.0.0.1 scripts/live_edge/log_retry_transport_test.ts
 deno test --no-lock --config supabase/functions/deno.json --allow-env --allow-sys=osRelease --deny-net scripts/live_edge/probe_test.ts
 ```
 
-The offline probe tests substitute provider ports and prohibit network access; they are safety contracts, not live qualification. The CI workflow runs those contracts, Python guard tests and isolated logging tests without credentials.
+The offline probe tests substitute provider ports and prohibit network access; they are safety contracts, not live qualification. The two retry suites allow only loopback HTTP, use synthetic signing credentials and observe the real SDK. The first also runs a native Node loopback backend. Dependency resolution can fetch SDK packages, but no real provider endpoint is permitted at runtime. CI installs the existing Node 22 baseline and runs these suites, Python guards, positive-abstract budget checks and isolated logging tests without cloud secrets. Its test job needs only read access to repository contents.
 
 ## Qualification observed on 2026-10-12
 
@@ -117,3 +200,29 @@ The test packages retained the captured production sources except for the option
 Offline gates passed 105 tests: 21 cache, 49 handler/log, 25 probe, six target/HTTP guard and four Crossref budget tests. Strict docpact and full-branch explicit-diff lint passed. Private source/provider receipts remain outside the public repository; no credentials or raw public-paper responses are committed.
 
 Sanitized aggregate receipt SHA-256: `72476e9d37bb59fe983b0f9692353a8bc78a66f1bebf1603e062da5b84c0f072`.
+
+## Follow-up qualification on 2026-10-12
+
+[Edge-functions #74](https://github.com/tiangong-ai/edge-functions/issues/74) completed the following isolated qualification. Branch `qujtuhjbamgzzkixrlay` was data-free, matched the 40-migration catalog and had empty selected business/Auth tables before synthetic setup. Only the three reviewed functions below were deployed, all with JWT verification enabled.
+
+- Normal SCI used its normal import map and real OpenAI/Pinecone/OpenSearch/Redis/PostgreSQL services. Two rounds passed four HTTP requests and 12 assertions: cold auth rejection, both backend markers, adjacent chunks and metadata hydration. The two successful searches produced two distinct timestamps and two UUID log documents, one per invocation.
+- The separate canary used the actual shared logger and signed SDK, injecting one acknowledgement fault after observing a real successful backend write. `retry_once` made two backend attempts with one UUID; read-back found exactly one document. `two_distinct` invoked the logger twice with identical fields and timestamp; three backend attempts retained two distinct UUIDs, and read-back found exactly those two documents. Both negative gateway/token checks returned 401; no unmatched canary-email document existed. The fault was injected by test transport code, not an observed spontaneous provider outage.
+- The canary resolved SDK **3.9.0**. The existing local cache initially resolved **3.6.0**; all five logger loopback tests also passed with a private temporary 3.9.0 map, including committed-write/socket-loss and independent identical calls. Repository import mappings and dependency versions were not changed. These are observed versions, not an assertion that hosted deployment inherits the root lockfile.
+- The two public papers below supplied real abstracts through four fresh Crossref GETs: two metadata requests and two requests through the actual resolver. Actual KB candidates went from two to zero; the writer updated two rows, replay updated zero and preserved both values. Exact UUID/DOI cleanup, repeated cleanup and an independent UUID-or-DOI absence query found zero residual rows. Discovery used five earlier read-only requests; those cached responses were not used for the positive run.
+- Cleanup removed all run-owned vectors, search/log indexes and three exact synthetic Redis keys. A read-only provider check after branch deletion confirmed zero vectors, missing indexes, zero logs and Redis EXISTS=0/TTL=-2. Before deletion, all five selected business tables plus Auth users/sessions were empty. The branch was then absent from the parent listing. Task credential copies and raw public response caches were removed; the user's source configuration was retained.
+- The downloaded SCI entrypoint, logger and normal import map matched reviewed staging/checkout bytes. All five downloaded canary files matched staging. The captured production SCI package was unchanged across 14 files. No production function deployment, production business-data export/mutation or infrastructure policy change was performed.
+
+| Public DOI | Clean abstract characters | SHA-256 |
+| --- | --- | --- |
+| `10.1128/jcm.12.1.60-62.1980` | 1,411 | `cbb529e80d200eff7440d7e884cdcdc9beb6b0bfc0ee1407a0d8a0f12280f7d2` |
+| `10.31168/2305-6754.2023.1.05` | 1,519 | `9f4810a6946e4e8f247bf35d9fce522269ed16778f7ccd2ae0e49c0807992b66` |
+
+| Isolated function | Version | Bundle SHA-256 |
+| --- | --- | --- |
+| `sci_search` | 1 | `9022116035d760d45fe1c426d842a6ad7dc914bb355569fb768b511acb642624` |
+| `live-edge-probe` | 1 | `725a7d268dab9b3a120ae7bfdc8f0d466fd01acbeaba56ffa98619359ac4cd63` |
+| `log-retry-canary` | 1 | `42cb94a7cdf5c89b852fbfc2fcaf3725c16f8041ca531e941b3618cbcb6a03b0` |
+
+The regression matrix passed 123 tests (21 cache, 46 handler, three log routing, six target/HTTP guards, 25 probe, 12 Crossref, five logger and five canary), plus five additional logger tests against the observed hosted SDK version. Independent local-app review confirmed the mechanism and loopback results; CI and deployment-documentation gaps it identified were resolved. Its initial lockfile-based hosted-version assumption was superseded by the canary receipt. The prior run had no transport trace, so its historical duplicate cause is not uniquely established. The fix guarantees neither HTTP-wide exactly-once execution nor delivery after exhausted retries/runtime termination.
+
+Sanitized aggregate receipt SHA-256: `1c130a2d47acac3a053bd57096ec131efc911918c2a9d6ea4e75229b20605bc5`.
