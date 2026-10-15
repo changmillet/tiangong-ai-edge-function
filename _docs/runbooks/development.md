@@ -13,8 +13,8 @@ checkPaths:
   - deno.json
   - Dockerfile
   - supabase/**
-lastReviewedAt: 2026-10-12
-lastReviewedCommit: b92089349be491fb8032ff41bf30c6c02ef4ee8f
+lastReviewedAt: 2026-10-15
+lastReviewedCommit: 757ab0fda9e5259fb0ab39ce16ab54063d20ca26
 ---
 
 # Edge Function Development Runbook
@@ -121,3 +121,7 @@ deno test --no-config --import-map scripts/fixtures/email_auth/import_map.json -
 Live evidence needs distinct synthetic markers returned from both retrieval backends, database metadata filtering/hydration, cold authorization rejection and bounded read-back of synthetic logs. HTTP 200 alone proves none of these. Existing email-cache semantics accept a cached email independently of the password; do not mislabel that as a password recheck. Keep private responses/credentials outside Git. Precisely clean fixtures and verify absence before deleting the test branch.
 
 Follow [the isolated live qualification runbook](isolated-live-qualification.md) for deployed HTTP/provider tests and the explicit cleanup evidence contract.
+
+Its Crossref harness accepts canonical `knowledge-base`/`agent-skills` sibling
+checkouts and the legacy workspace names. Run its path-selection and safety
+contracts offline with `python3 scripts/live_edge/crossref_check.py --self-test`.

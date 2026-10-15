@@ -47,6 +47,20 @@ POSITIVE_SAMPLE = {
 POSITIVE_MAX_REQUESTS = 4  # Two fresh metadata GETs and two fresh resolver GETs.
 
 
+def qualification_sources(workspace: Path | None = None) -> tuple[Path, Path]:
+    """Locate source checkouts in canonical or pre-rename workspaces."""
+    workspace = WORKSPACE if workspace is None else workspace
+
+    def sibling(canonical: str, legacy: str) -> Path:
+        for name in (canonical, legacy):
+            candidate = workspace / name
+            if candidate.is_dir():
+                return candidate
+        raise SafeError(f"Required sibling checkout is missing: {canonical}")
+
+    return sibling("knowledge-base", "TianGong-AI-KB"), sibling("agent-skills", "skills")
+
+
 class TransportStop(BaseException):
     """Escape the skill's 30-attempt retry policy without another network call."""
 
@@ -143,6 +157,7 @@ def qualify(target_path: Path) -> dict:
     target = load_private(target_path)
     validate_target(target)
     assert target["project_ref"] == BRANCH_REF
+    kb_root, skills_root = qualification_sources()
     state_path = target_path.parent / "crossref-live.private.json"
     receipt_path = target_path.parent / "crossref-live.json"
     if state_path.exists() or receipt_path.exists():
@@ -156,8 +171,6 @@ def qualify(target_path: Path) -> dict:
     result = None
     with tempfile.TemporaryDirectory(prefix="tiangong-public-crossref-") as temporary_name:
         temporary = Path(temporary_name)
-        kb_root = WORKSPACE / "TianGong-AI-KB"
-        skills_root = WORKSPACE / "skills"
         empty_env = temporary / "empty.env"
         empty_env.write_text("")
         copied_skills = temporary / "skills"
@@ -336,6 +349,7 @@ def confirm_existing_abstracts(target_path: Path) -> dict:
     receipt = json.loads(receipt_path.read_text())
     if not receipt.get("ok") or not receipt.get("fixtures_cleaned") or receipt.get("abstract_confirmation"):
         raise SafeError("A cleaned successful public sample is required; confirmation cannot be repeated")
+    kb_root, skills_root = qualification_sources()
     old_environment = dict(os.environ)
     connection = None
     inserted = []
@@ -347,11 +361,11 @@ def confirm_existing_abstracts(target_path: Path) -> dict:
         empty_env = temporary / "empty.env"
         empty_env.write_text("")
         environment = {key: value for key, value in old_environment.items() if key in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")}
-        environment.update({"DATABASE_URL": target["db_url"], "KB_ENV_FILE": str(empty_env), "PYTHON_DOTENV_DISABLED": "1", "KB_SKILLS_DIR": str(WORKSPACE / "skills"), "KB_LOG_DIR": str(temporary / "logs"), "KB_ABSTRACT_STATE_PATH": str(temporary / "abstract-state.json")})
+        environment.update({"DATABASE_URL": target["db_url"], "KB_ENV_FILE": str(empty_env), "PYTHON_DOTENV_DISABLED": "1", "KB_SKILLS_DIR": str(skills_root), "KB_LOG_DIR": str(temporary / "logs"), "KB_ABSTRACT_STATE_PATH": str(temporary / "abstract-state.json")})
         try:
             os.environ.clear()
             os.environ.update(environment)
-            sys.path.insert(0, str(WORKSPACE / "TianGong-AI-KB/src/file_processing/journals"))
+            sys.path.insert(0, str(kb_root / "src/file_processing/journals"))
             import kb_abstract_pipeline as pipeline
             import kb_runtime
             import psycopg2
@@ -560,6 +574,7 @@ def qualify_positive_abstracts(target_path: Path) -> dict:
     receipt_path = target_path.parent / "crossref-positive-abstract.json"
     if state_path.exists() or receipt_path.exists():
         raise SafeError("Positive abstract qualification already has a receipt; refusing reuse")
+    kb_root, skills_root = qualification_sources()
     state = {"schema_version": 1, "project_ref": target["project_ref"], "run_id": target["run_id"],
              "owned_rows": [{"doi": doi, "id": str(uuid.uuid4()), "owner_run_id": target["run_id"], "insert_requested": False} for doi in POSITIVE_SAMPLE],
              "requests": [], "responses": [], "cleanup_verified": False, "source_sha256": {}}
@@ -576,7 +591,7 @@ def qualify_positive_abstracts(target_path: Path) -> dict:
         empty_env.write_text("")
         copied_skills = temporary / "skills"
         for name, filename in (("fetch-meta-to-kb", "fetch_meta_to_kb.py"), ("fetch-abstract-to-kb", "fetch_abstract_to_kb.py")):
-            source = WORKSPACE / "skills" / name / "scripts" / filename
+            source = skills_root / name / "scripts" / filename
             destination = copied_skills / name / "scripts" / filename
             destination.parent.mkdir(parents=True)
             shutil.copyfile(source, destination)
@@ -587,14 +602,14 @@ def qualify_positive_abstracts(target_path: Path) -> dict:
         try:
             os.environ.clear()
             os.environ.update(environment)
-            sys.path.insert(0, str(WORKSPACE / "TianGong-AI-KB/src/file_processing/journals"))
+            sys.path.insert(0, str(kb_root / "src/file_processing/journals"))
             import kb_abstract_pipeline as pipeline
             import kb_runtime
             import psycopg2
             from psycopg2.extras import Json
 
             for name in ("kb_abstract_pipeline.py", "kb_runtime.py"):
-                source = WORKSPACE / "TianGong-AI-KB/src/file_processing/journals" / name
+                source = kb_root / "src/file_processing/journals" / name
                 state["source_sha256"][str(source.relative_to(WORKSPACE))] = hashlib.sha256(source.read_bytes()).hexdigest()
             private_json(state_path, state)
             metadata_skill = kb_runtime.load_skill("fetch-meta-to-kb", "fetch_meta_to_kb.py")
@@ -747,6 +762,36 @@ def qualify_positive_abstracts(target_path: Path) -> dict:
 def self_test() -> None:
     """Pure budget and hard-target checks; never open a network or DB socket."""
     import unittest
+    class SourceTests(unittest.TestCase):
+        def test_canonical_legacy_mixed_and_dual_checkouts(self):
+            for names, expected in (
+                (("knowledge-base", "agent-skills"), ("knowledge-base", "agent-skills")),
+                (("TianGong-AI-KB", "skills"), ("TianGong-AI-KB", "skills")),
+                (("knowledge-base", "skills"), ("knowledge-base", "skills")),
+                (("TianGong-AI-KB", "agent-skills"), ("TianGong-AI-KB", "agent-skills")),
+                (("knowledge-base", "agent-skills", "TianGong-AI-KB", "skills"), ("knowledge-base", "agent-skills")),
+            ):
+                with self.subTest(names=names), tempfile.TemporaryDirectory() as directory:
+                    workspace = Path(directory)
+                    for name in names:
+                        (workspace / name).mkdir()
+                    self.assertEqual(qualification_sources(workspace), tuple(workspace / name for name in expected))
+        def test_files_are_not_source_checkouts(self):
+            with tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                for name in ("knowledge-base", "agent-skills"):
+                    (workspace / name).write_text("not a checkout")
+                for name in ("TianGong-AI-KB", "skills"):
+                    (workspace / name).mkdir()
+                self.assertEqual(qualification_sources(workspace), (workspace / "TianGong-AI-KB", workspace / "skills"))
+        def test_missing_sources_are_refused(self):
+            for names in ((), ("knowledge-base",), ("agent-skills",)):
+                with self.subTest(names=names), tempfile.TemporaryDirectory() as directory:
+                    workspace = Path(directory)
+                    for name in names:
+                        (workspace / name).mkdir()
+                    with self.assertRaises(SafeError):
+                        qualification_sources(workspace)
     target = {"schema_version": 1, "project_ref": BRANCH_REF, "parent_project_ref": "qyyqlnwqwgvzxnccnbgm", "with_data": False, "branch_id": str(uuid.uuid4()), "run_id": "a" * 16, "prefix": "live72-" + "a" * 16 + "-", "api_url": f"https://{BRANCH_REF}.supabase.co", "db_url": f"postgresql://postgres:synthetic@db.{BRANCH_REF}.supabase.co/postgres", "anon_key": "synthetic", "publishable_key": "synthetic", "service_role_key": "synthetic", "run_token": "synthetic"}
     class BudgetTests(unittest.TestCase):
         def state(self):
@@ -870,7 +915,7 @@ def self_test() -> None:
             state = self.state()
             cleanup_positive_rows(Connection(), state, target)
             self.assertTrue(state["cleanup_verified"])
-    suite = unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(BudgetTests), unittest.defaultTestLoader.loadTestsFromTestCase(PositiveTests)])
+    suite = unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(SourceTests), unittest.defaultTestLoader.loadTestsFromTestCase(BudgetTests), unittest.defaultTestLoader.loadTestsFromTestCase(PositiveTests)])
     results = unittest.TextTestRunner().run(suite)
     if not results.wasSuccessful():
         raise SafeError("Crossref offline safety checks failed")

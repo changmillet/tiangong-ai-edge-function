@@ -15,8 +15,8 @@ checkPaths:
     supabase/functions/_shared/supabase_function_log.ts,
     .github/workflows/docpact.yml,
   ]
-lastReviewedAt: 2026-10-12
-lastReviewedCommit: baf61f6839a45becf0c57c414c4b3c5f4b9eca20
+lastReviewedAt: 2026-10-15
+lastReviewedCommit: 757ab0fda9e5259fb0ab39ce16ab54063d20ca26
 ---
 
 # Isolated hosted qualification
@@ -133,6 +133,14 @@ supabase functions deploy log-retry-canary --project-ref VERIFIED_PREVIEW_REF --
 Do not omit the function name, pass `--prune`, or reuse this mapping for normal SCI/search deployments. Download/read back the deployed source package and verify all staged file hashes, its wrapper, import map and gateway JWT setting. An API bundle upload does not inherit the repository's root `deno.lock`; the normal npm aliases are unversioned. Record SDK versions actually returned by the canary rather than inferring a pin from a local lockfile or test run.
 
 ## Public Crossref exception
+
+The Crossref harness locates sibling source checkouts relative to this repository:
+`knowledge-base` and `agent-skills` take precedence, with `TianGong-AI-KB` and
+`skills` supported for older workspace layouts. Each sibling is resolved
+independently; a missing pair is rejected before qualification writes. All three
+collection/confirmation/backfill modes use these paths for imports, source
+copies and source hashes. Temporary copied skills still use a private `skills`
+directory and its explicit `KB_SKILLS_DIR`; no source checkout is modified.
 
 Only when separately authorized, `crossref_check.py` qualifies the actual KB collector against at most two public papers and four Crossref GETs. It leaves the KB collector and skill sources unchanged, bounds live pagination at the transport boundary, and records source hashes. Duplicate insertion uses a clearly labelled local replay of the captured real HTTP responses; it is not a second live query. The optional `--confirm-existing-abstracts` action reads only those same two DOIs. No fabricated abstract is substituted when Crossref returns none. Other provider fallbacks are disabled for this narrowly authorized Crossref check.
 
