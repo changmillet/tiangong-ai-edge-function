@@ -1,7 +1,7 @@
 version: 1
 layout: repo
-lastReviewedAt: "2026-10-12"
-lastReviewedCommit: "1e1915162beb46f0451fa1ad239a6966bf9e9dc4"
+lastReviewedAt: "2026-10-15"
+lastReviewedCommit: "757ab0fda9e5259fb0ab39ce16ab54063d20ca26"
 
 repo:
   id: edge-function

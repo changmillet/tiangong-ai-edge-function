@@ -12,8 +12,8 @@ checkPaths:
   - supabase/config.toml
   - Dockerfile
   - package.json
-lastReviewedAt: 2026-10-12
-lastReviewedCommit: b92089349be491fb8032ff41bf30c6c02ef4ee8f
+lastReviewedAt: 2026-10-15
+lastReviewedCommit: 757ab0fda9e5259fb0ab39ce16ab54063d20ca26
 ---
 
 # Edge Function Architecture
@@ -60,5 +60,10 @@ Successful password validation creates a missing Redis marker with `SET email va
 
 - MCP server calls these edge functions through configured Supabase deployment URLs.
 - KB and unstructure repositories produce or maintain data that these functions query, but this repo only owns the API execution surface.
+
+The isolated Crossref qualification harness imports the sibling `knowledge-base`
+collector and copies sources from `agent-skills`, falling back independently to
+the legacy `TianGong-AI-KB` and `skills` workspace directory names. This source
+discovery does not change deployed Edge Function dependencies or configuration.
 
 The shared logger accepts `OPENSEARCH_LOG_INDEX_NAME`; unset or blank values retain `function_log`. Isolated qualification can direct synthetic logs to a separate index without changing production defaults or document fields. Each `logInsert` call assigns one random UUID before invoking the SDK, so transport retries address the same document after a committed write loses its acknowledgement. Independent calls retain distinct IDs even when all five document fields match. The write remains asynchronous; supported Edge runtimes register its caught promise with `EdgeRuntime.waitUntil`, and errors log only their class name. This provides per-call retry idempotence, not HTTP-request deduplication or guaranteed delivery. Successful logging still requires bounded read-back evidence.
